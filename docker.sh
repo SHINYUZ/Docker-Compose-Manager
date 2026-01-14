@@ -434,7 +434,7 @@ backup_center() {
     done
 }
 
-# --- 子功能：手动备份 ---
+# --- 子功能：手动备份 (已修复：增加停机备份逻辑) ---
 manual_backup_menu() {
     while true; do
         echo ""
@@ -476,19 +476,38 @@ manual_backup_menu() {
         
         backup_file="${BACKUP_DIR}/${p_name}_$(date +%Y%m%d_%H%M%S).tar.gz"
 
-        echo -e "${BLUE}正在打包目录: ${p_path}...${PLAIN}"
+        echo -e "${BLUE}正在处理项目: ${p_name}...${PLAIN}"
         echo ""
 
         parent_dir=$(dirname "$p_path")
         target_name=$(basename "$p_path")
         
+        # 1. 尝试停止容器
+        echo -e "${YELLOW}正在暂停容器以确保数据完整...${PLAIN}"
+        if cd "$p_path"; then
+             docker compose stop
+        fi
+        echo ""
+
+        # 2. 执行打包
+        echo -e "${BLUE}正在打包目录...${PLAIN}"
         if tar -czf "$backup_file" -C "$parent_dir" "$target_name"; then
-            echo -e "${GREEN}备份成功！${PLAIN}"
             echo ""
+            echo -e "${GREEN}备份成功！${PLAIN}"
             echo -e "备份文件: ${YELLOW}${backup_file}${PLAIN}"
         else
-            echo -e "${RED}备份失败。${PLAIN}"
+            echo ""
+            echo -e "${RED}备份失败！${PLAIN}"
         fi
+
+        # 3. 恢复容器
+        echo ""
+        echo -e "${YELLOW}正在恢复容器运行...${PLAIN}"
+        if cd "$p_path"; then
+             docker compose start
+        fi
+        echo -e "${GREEN}服务已恢复。${PLAIN}"
+
         any_key_back
     done
 }
@@ -556,7 +575,7 @@ auto_backup_settings() {
                 
                 mkdir -p "$(dirname "$AUTO_BACKUP_SCRIPT")"
 
-                # 生成后台备份脚本 (注意：这里已移除了 find -delete 命令)
+                # 生成后台备份脚本 (已增加自动停机/开机逻辑，确保数据库完整)
                 cat > "$AUTO_BACKUP_SCRIPT" <<EOF
 #!/bin/bash
 BACKUP_DIR="${BACKUP_DIR}"
@@ -569,7 +588,19 @@ while IFS="|" read -r name path; do
         filename="\${name}_\$(date +%Y%m%d_%H%M%S).tar.gz"
         parent_dir=\$(dirname "\$path")
         target_name=\$(basename "\$path")
+
+        # 1. 先尝试停止容器 (确保 SQLite 数据库不被写入)
+        if cd "\$path"; then
+             docker compose stop
+        fi
+
+        # 2. 执行备份
         tar -czf "\$BACKUP_DIR/\$filename" -C "\$parent_dir" "\$target_name"
+
+        # 3. 恢复容器启动
+        if cd "\$path"; then
+             docker compose start
+        fi
     fi
 done < "\$CONF"
 EOF
@@ -696,21 +727,45 @@ script_mgmt_menu() {
     while true; do
         echo ""
         echo -e "========= 管理脚本 =========\n"
-        echo -e " 1. 卸载\n"
+        echo -e " 1. 更新脚本\n"
+        echo -e " 2. 卸载脚本\n"
         echo -e " 0. 返回\n"
-        read -p "请选择[0-1]: " sub_choice
+        
+        read -p "请选择[0-2]: " sub_choice
         
         if [[ "$sub_choice" == "0" ]]; then
             return
         fi
         
         case "$sub_choice" in
-            1) 
+            1)
+                echo -e "\n========= 更新脚本 =========\n"
+                echo -e "${BLUE}正在下载最新版本...${PLAIN}"
+                echo ""
+
+                # 使用 "$0" 确保覆盖当前正在运行的这个脚本文件
+                wget --no-check-certificate "https://raw.githubusercontent.com/SHINYUZ/Docker-Compose-Manager/main/docker.sh" -O "$0"
+
+                if [[ $? -eq 0 ]]; then
+                    chmod +x "$0"
+                    # 这里去掉了 echo ""，防止出现两行空行
+                    echo -e "${GREEN}更新成功！正在重启脚本...${PLAIN}"
+                    sleep 1
+                    # 重启脚本
+                    exec "$0"
+                else
+                    echo ""
+                    echo -e "${RED}下载失败，请检查网络连接。${PLAIN}"
+                    any_key_back
+                fi
+                ;;
+            2) 
                 echo -e "\n========= 卸载管理 =========\n"
+                
                 read -p "确认卸载本脚本及配置文件? (Docker容器不会被删除) (y/n): " confirm
                 echo ""
+                
                 if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                    # 获取当前脚本的真实路径（如果是软链接，则获取源文件路径）
                     local current_script=$(readlink -f "$0")
 
                     rm -f "$CRON_FILE"
@@ -728,7 +783,10 @@ script_mgmt_menu() {
                     any_key_back
                 fi
                 ;;
-            *) echo -e "\n${RED}无效选项${PLAIN}"; sleep 1 ;;
+            *) 
+                echo -e "\n${RED}无效选项${PLAIN}"
+                sleep 1 
+                ;;
         esac
     done
 }
