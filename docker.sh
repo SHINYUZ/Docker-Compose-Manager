@@ -434,7 +434,7 @@ backup_center() {
     done
 }
 
-# --- 子功能：手动备份 (已修复：增加停机备份逻辑) ---
+# --- 子功能：手动备份 (已修复：增加停机备份逻辑 + 格式微调) ---
 manual_backup_menu() {
     while true; do
         echo ""
@@ -484,6 +484,7 @@ manual_backup_menu() {
         
         # 1. 尝试停止容器
         echo -e "${YELLOW}正在暂停容器以确保数据完整...${PLAIN}"
+        echo ""  # <--- 修改点：这里加了空行
         if cd "$p_path"; then
              docker compose stop
         fi
@@ -494,6 +495,7 @@ manual_backup_menu() {
         if tar -czf "$backup_file" -C "$parent_dir" "$target_name"; then
             echo ""
             echo -e "${GREEN}备份成功！${PLAIN}"
+            echo ""  # <--- 修改点：这里加了空行
             echo -e "备份文件: ${YELLOW}${backup_file}${PLAIN}"
         else
             echo ""
@@ -503,11 +505,14 @@ manual_backup_menu() {
         # 3. 恢复容器
         echo ""
         echo -e "${YELLOW}正在恢复容器运行...${PLAIN}"
+        echo ""  # <--- 修改点：这里加了空行
         if cd "$p_path"; then
              docker compose start
         fi
-        echo -e "${GREEN}服务已恢复。${PLAIN}"
-
+        
+        echo ""  # <--- 修改点：服务已恢复上方加了空行
+        echo -e "${GREEN}服务已恢复${PLAIN}" # <--- 修改点：去掉了句号
+        
         any_key_back
     done
 }
