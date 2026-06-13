@@ -57,6 +57,58 @@ get_status() {
     fi
 }
 
+# --- 工具函数：查找 Compose 配置文件 ---
+find_compose_file() {
+    local project_path="$1"
+    local compose_name
+
+    for compose_name in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+        if [[ -f "$project_path/$compose_name" ]]; then
+            printf '%s\n' "$project_path/$compose_name"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# --- 工具函数：检查项目是否正在运行 ---
+is_project_running() {
+    local project_path="$1"
+
+    [[ -d "$project_path" ]] || return 1
+    cd "$project_path" || return 1
+    docker compose ps -q --status running 2>/dev/null | grep -q .
+}
+
+# --- 工具函数：验证项目名称 ---
+validate_project_name() {
+    local project_name="$1"
+
+    if [[ -z "$project_name" || "$project_name" == *"|"* || "$project_name" == *"/"* || "$project_name" == *"\\"* || "$project_name" == *"*"* || "$project_name" == *"?"* || "$project_name" == *"["* || "$project_name" == *"]"* || "$project_name" == *$'\n'* || "$project_name" == "." || "$project_name" == ".." ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+# --- 工具函数：验证项目路径 ---
+validate_project_path() {
+    local project_path="$1"
+
+    if [[ -z "$project_path" || "$project_path" != /* || "$project_path" == *"|"* || "$project_path" == *$'\n'* ]]; then
+        return 1
+    fi
+
+    case "$project_path" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 # --- 工具函数：扫描已存在的项目 ---
 scan_existing_projects() {
     if ! systemctl is-active docker &> /dev/null; then
@@ -164,11 +216,17 @@ add_project() {
     read -p "请输入项目别名: " p_name
     echo ""
     
-    read -p "请输入 docker-compose.yml 所在绝对路径: " p_path
+    read -p "请输入 Compose 配置文件所在绝对路径: " p_path
     echo ""
 
     if [[ -z "$p_name" || -z "$p_path" ]]; then
         echo -e "${RED}名称或路径不能为空。${PLAIN}"
+        any_key_back
+        return
+    fi
+
+    if ! validate_project_name "$p_name"; then
+        echo -e "${RED}项目名称不能包含 | / \\ 或换行符。${PLAIN}"
         any_key_back
         return
     fi
@@ -179,13 +237,21 @@ add_project() {
         return
     fi
 
-    if [[ ! -f "$p_path/docker-compose.yml" && ! -f "$p_path/docker-compose.yaml" ]]; then
-        echo -e "${RED}该目录下未找到 docker-compose.yml 文件！${PLAIN}"
+    p_path=$(readlink -f "$p_path")
+
+    if ! validate_project_path "$p_path"; then
+        echo -e "${RED}项目路径无效或属于受保护的系统目录。${PLAIN}"
         any_key_back
         return
     fi
 
-    if grep -q "^${p_name}|" "$PROJECT_CONF_FILE"; then
+    if ! find_compose_file "$p_path" &> /dev/null; then
+        echo -e "${RED}该目录下未找到 Compose 配置文件！${PLAIN}"
+        any_key_back
+        return
+    fi
+
+    if awk -F'|' -v name="$p_name" '$1 == name { found=1 } END { exit !found }' "$PROJECT_CONF_FILE"; then
         echo -e "${RED}项目名称已存在。${PLAIN}"
     else
         echo "${p_name}|${p_path}" >> "$PROJECT_CONF_FILE"
@@ -304,25 +370,37 @@ manage_project() {
                 1)
                     echo -e "${BLUE}正在启动...${PLAIN}"
                     echo ""
-                    docker compose up -d
-                    echo ""
-                    echo -e "${GREEN}执行完成。${PLAIN}"
+                    if docker compose up -d; then
+                        echo ""
+                        echo -e "${GREEN}启动完成${PLAIN}"
+                    else
+                        echo ""
+                        echo -e "${RED}启动失败，请查看上方错误信息${PLAIN}"
+                    fi
                     any_key_back
                     ;;
                 2)
                     echo -e "${BLUE}正在停止容器...${PLAIN}"
                     echo ""
-                    docker compose down
-                    echo ""
-                    echo -e "${GREEN}已停止。${PLAIN}"
+                    if docker compose down; then
+                        echo ""
+                        echo -e "${GREEN}已停止${PLAIN}"
+                    else
+                        echo ""
+                        echo -e "${RED}停止失败，请查看上方错误信息${PLAIN}"
+                    fi
                     any_key_back
                     ;;
                 3)
                     echo -e "${BLUE}正在重启...${PLAIN}"
                     echo ""
-                    docker compose restart
-                    echo ""
-                    echo -e "${GREEN}已重启。${PLAIN}"
+                    if docker compose restart; then
+                        echo ""
+                        echo -e "${GREEN}已重启${PLAIN}"
+                    else
+                        echo ""
+                        echo -e "${RED}重启失败，请查看上方错误信息${PLAIN}"
+                    fi
                     any_key_back
                     ;;
                 4)
@@ -332,9 +410,13 @@ manage_project() {
                          echo ""
                          echo -e "${GREEN}下载成功，正在应用更新...${PLAIN}"
                          echo ""
-                         docker compose up -d
-                         echo ""
-                         echo -e "${GREEN}更新完成。${PLAIN}"
+                         if docker compose up -d; then
+                             echo ""
+                             echo -e "${GREEN}更新完成${PLAIN}"
+                         else
+                             echo ""
+                             echo -e "${RED}镜像已下载，但容器更新失败${PLAIN}"
+                         fi
                     else
                          echo ""
                          echo -e "${RED}镜像下载失败 (本地镜像或私有仓库无需更新，请使用'启动容器')${PLAIN}"
@@ -344,44 +426,74 @@ manage_project() {
                     any_key_back
                     ;;
                 5)
-                    read -p "确认删除此容器? (y/n): " confirm
+                    echo -e "${RED}警告：此操作将删除项目目录及其中的全部数据${PLAIN}"
                     echo ""
-                    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                    echo -e "项目名称: ${YELLOW}${p_name}${PLAIN}"
+                    echo ""
+                    echo -e "项目路径: ${YELLOW}${p_path}${PLAIN}"
+                    echo ""
+                    read -p "请输入项目名称 ${p_name} 确认删除: " confirm_name
+                    echo ""
+                    if [[ "$confirm_name" == "$p_name" ]]; then
+                        if ! validate_project_path "$p_path" || [[ ! -d "$p_path" ]]; then
+                            echo -e "${RED}项目路径无效，已取消删除${PLAIN}"
+                            any_key_back
+                            continue
+                        fi
+
                         echo -e "${BLUE}正在停止容器并清理数据卷...${PLAIN}"
                         echo ""
-                        docker compose down --volumes
-                        echo ""
-                        echo -e "${BLUE}正在删除项目文件...${PLAIN}"
-                        echo ""
-                        
-                        cd ..
-                        rm -rf "$p_path"
-                        
-                        sed -i "${p_idx}d" "$PROJECT_CONF_FILE"
-                        
-                        echo -e "${GREEN}删除完成。${PLAIN}"
-                        any_key_back
-                        return 
+                        if docker compose down --volumes; then
+                            echo ""
+                            echo -e "${BLUE}正在删除项目文件...${PLAIN}"
+                            echo ""
+
+                            cd /
+                            if rm -rf -- "$p_path"; then
+                                sed -i "${p_idx}d" "$PROJECT_CONF_FILE"
+                                echo -e "${GREEN}删除完成${PLAIN}"
+                                any_key_back
+                                return
+                            else
+                                echo -e "${RED}项目文件删除失败，项目记录已保留${PLAIN}"
+                            fi
+                        else
+                            echo ""
+                            echo -e "${RED}容器停止失败，已取消删除项目文件${PLAIN}"
+                        fi
                     else
-                        echo -e "${YELLOW}已取消。${PLAIN}"
-                        any_key_back
+                        echo -e "${YELLOW}项目名称不匹配，已取消删除${PLAIN}"
                     fi
+                    any_key_back
                     ;;
                 6)
                     read -p "请输入新的项目名称: " new_name
                     echo ""
-                    if [[ -n "$new_name" ]]; then
-                        sed -i "${p_idx}s/^[^|]*/${new_name}/" "$PROJECT_CONF_FILE"
+                    if validate_project_name "$new_name"; then
+                        if awk -F'|' -v name="$new_name" -v current="$p_name" '$1 == name && $1 != current { found=1 } END { exit !found }' "$PROJECT_CONF_FILE"; then
+                            echo -e "${RED}项目名称已存在${PLAIN}"
+                            any_key_back
+                            continue
+                        fi
+
+                        lines[$((p_idx-1))]="${new_name}|${p_path}"
+                        printf '%s\n' "${lines[@]}" > "$PROJECT_CONF_FILE"
                         p_name="$new_name"
                         echo -e "${GREEN}名称修改成功！${PLAIN}"
                         mapfile -t lines < "$PROJECT_CONF_FILE"
                     else
-                        echo -e "${YELLOW}未输入名称，取消修改。${PLAIN}"
+                        echo -e "${YELLOW}名称无效，不能包含 | / \\ 或换行符${PLAIN}"
                     fi
                     any_key_back
                     ;;
                 7)
-                    nano docker-compose.yml
+                    compose_file=$(find_compose_file "$p_path")
+                    if [[ -n "$compose_file" ]]; then
+                        nano "$compose_file"
+                    else
+                        echo -e "${RED}未找到 Compose 配置文件${PLAIN}"
+                        any_key_back
+                    fi
                     ;;
                 8)
                     docker compose logs --tail 100
@@ -409,10 +521,12 @@ backup_center() {
         echo ""
         echo -e " 2. 定时自动备份设置"
         echo ""
+        echo -e " 3. 恢复项目备份"
+        echo ""
         echo -e " 0. 返回"
         echo ""
         
-        read -p "请选择操作 [0-2]: " b_main_choice
+        read -p "请选择操作 [0-3]: " b_main_choice
         
         if [[ "$b_main_choice" == "0" ]]; then
             return
@@ -424,6 +538,9 @@ backup_center() {
                 ;;
             2)
                 auto_backup_settings
+                ;;
+            3)
+                restore_backup_menu
                 ;;
             *) 
                 echo ""
@@ -482,37 +599,263 @@ manual_backup_menu() {
         parent_dir=$(dirname "$p_path")
         target_name=$(basename "$p_path")
         
-        # 1. 尝试停止容器
-        echo -e "${YELLOW}正在暂停容器以确保数据完整...${PLAIN}"
-        echo ""  # <--- 修改点：这里加了空行
-        if cd "$p_path"; then
-             docker compose stop
+        was_running=0
+        if is_project_running "$p_path"; then
+            was_running=1
+            echo -e "${YELLOW}正在暂停容器以确保数据完整...${PLAIN}"
+            echo ""
+            if ! docker compose stop; then
+                echo ""
+                echo -e "${RED}容器停止失败，已取消备份${PLAIN}"
+                any_key_back
+                continue
+            fi
+        else
+            echo -e "${YELLOW}项目当前未运行，将保持停止状态${PLAIN}"
         fi
         echo ""
 
-        # 2. 执行打包
         echo -e "${BLUE}正在打包目录...${PLAIN}"
+        backup_success=0
         if tar -czf "$backup_file" -C "$parent_dir" "$target_name"; then
+            backup_success=1
             echo ""
             echo -e "${GREEN}备份成功！${PLAIN}"
-            echo ""  # <--- 修改点：这里加了空行
+            echo ""
             echo -e "备份文件: ${YELLOW}${backup_file}${PLAIN}"
         else
             echo ""
             echo -e "${RED}备份失败！${PLAIN}"
+            rm -f "$backup_file"
         fi
 
-        # 3. 恢复容器
-        echo ""
-        echo -e "${YELLOW}正在恢复容器运行...${PLAIN}"
-        echo ""  # <--- 修改点：这里加了空行
-        if cd "$p_path"; then
-             docker compose start
+        if [[ "$was_running" -eq 1 ]]; then
+            echo ""
+            echo -e "${YELLOW}正在恢复容器运行...${PLAIN}"
+            echo ""
+            if docker compose start; then
+                echo ""
+                echo -e "${GREEN}服务已恢复${PLAIN}"
+            else
+                echo ""
+                if [[ "$backup_success" -eq 1 ]]; then
+                    echo -e "${RED}备份已完成，但服务恢复失败${PLAIN}"
+                else
+                    echo -e "${RED}备份失败，服务恢复也失败${PLAIN}"
+                fi
+            fi
+        else
+            echo ""
+            echo -e "${GREEN}项目仍保持停止状态${PLAIN}"
         fi
-        
-        echo ""  # <--- 修改点：服务已恢复上方加了空行
-        echo -e "${GREEN}服务已恢复${PLAIN}" # <--- 修改点：去掉了句号
-        
+
+        any_key_back
+    done
+}
+
+# --- 子功能：恢复项目备份 ---
+restore_backup_menu() {
+    while true; do
+        echo ""
+        echo -e "========= 恢复项目备份 =========\n"
+
+        if [[ ! -s "$PROJECT_CONF_FILE" ]]; then
+            echo -e "${RED}项目列表为空。${PLAIN}"
+            any_key_back
+            return
+        fi
+
+        mapfile -t lines < "$PROJECT_CONF_FILE"
+        local i=1
+        for line in "${lines[@]}"; do
+            name=$(echo "$line" | cut -d'|' -f1)
+            echo -e " ${i}. ${name}"
+            echo ""
+            ((i++))
+        done
+        echo -e " 0. 返回"
+        echo ""
+
+        read -p "请选择要恢复的项目 [0-${#lines[@]}]: " r_idx
+        if [[ "$r_idx" == "0" ]]; then
+            return
+        fi
+
+        echo ""
+
+        if ! [[ "$r_idx" =~ ^[0-9]+$ ]] || [[ "$r_idx" -lt 1 ]] || [[ "$r_idx" -gt ${#lines[@]} ]]; then
+            echo -e "${RED}无效的选择。${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        selected_line="${lines[$((r_idx-1))]}"
+        p_name=$(echo "$selected_line" | cut -d'|' -f1)
+        p_path=$(echo "$selected_line" | cut -d'|' -f2)
+
+        if ! validate_project_path "$p_path" || [[ ! -d "$p_path" ]]; then
+            echo -e "${RED}项目路径无效或不存在，无法恢复${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        mapfile -t backup_files < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "${p_name}_*.tar.gz" -printf '%T@|%p\n' 2>/dev/null | sort -t'|' -k1,1nr | cut -d'|' -f2-)
+
+        if [[ ${#backup_files[@]} -eq 0 ]]; then
+            echo -e "${YELLOW}没有找到项目 ${p_name} 的备份文件${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        echo -e "请选择要恢复的备份："
+        echo ""
+        i=1
+        for backup_file in "${backup_files[@]}"; do
+            echo -e " ${i}. $(basename "$backup_file")"
+            echo ""
+            ((i++))
+        done
+        echo -e " 0. 返回"
+        echo ""
+
+        read -p "请选择备份 [0-${#backup_files[@]}]: " backup_idx
+        if [[ "$backup_idx" == "0" ]]; then
+            continue
+        fi
+
+        echo ""
+
+        if ! [[ "$backup_idx" =~ ^[0-9]+$ ]] || [[ "$backup_idx" -lt 1 ]] || [[ "$backup_idx" -gt ${#backup_files[@]} ]]; then
+            echo -e "${RED}无效的选择。${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        selected_backup="${backup_files[$((backup_idx-1))]}"
+        parent_dir=$(dirname "$p_path")
+        target_name=$(basename "$p_path")
+
+        if ! archive_list=$(tar -tzf "$selected_backup" 2>/dev/null) || [[ -z "$archive_list" ]]; then
+            echo -e "${RED}备份文件损坏或无法读取${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        archive_valid=1
+        while IFS= read -r archive_entry; do
+            if [[ "$archive_entry" != "$target_name" && "$archive_entry" != "$target_name/" && "$archive_entry" != "$target_name/"* ]]; then
+                archive_valid=0
+                break
+            fi
+        done <<< "$archive_list"
+
+        if [[ "$archive_valid" -ne 1 ]]; then
+            echo -e "${RED}备份内容与当前项目目录不匹配，已取消恢复${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        echo -e "目标项目: ${YELLOW}${p_name}${PLAIN}"
+        echo ""
+        echo -e "备份文件: ${YELLOW}$(basename "$selected_backup")${PLAIN}"
+        echo ""
+        echo -e "恢复路径: ${YELLOW}${p_path}${PLAIN}"
+        echo ""
+        echo -e "${RED}警告：当前项目内容将被备份版本替换${PLAIN}"
+        echo ""
+        read -p "请输入项目名称 ${p_name} 确认恢复: " confirm_name
+        echo ""
+
+        if [[ "$confirm_name" != "$p_name" ]]; then
+            echo -e "${YELLOW}项目名称不匹配，已取消恢复${PLAIN}"
+            any_key_back
+            continue
+        fi
+
+        was_running=0
+        if is_project_running "$p_path"; then
+            was_running=1
+            echo -e "${YELLOW}正在停止容器...${PLAIN}"
+            echo ""
+            if ! docker compose stop; then
+                echo ""
+                echo -e "${RED}容器停止失败，已取消恢复${PLAIN}"
+                any_key_back
+                continue
+            fi
+            echo ""
+        fi
+
+        pre_restore_backup="${BACKUP_DIR}/${p_name}_before_restore_$(date +%Y%m%d_%H%M%S).tar.gz"
+        echo -e "${BLUE}正在创建恢复前快照...${PLAIN}"
+        echo ""
+        if ! tar -czf "$pre_restore_backup" -C "$parent_dir" "$target_name"; then
+            rm -f "$pre_restore_backup"
+            echo -e "${RED}恢复前快照创建失败，已取消恢复${PLAIN}"
+            if [[ "$was_running" -eq 1 ]]; then
+                cd "$p_path" && docker compose start
+            fi
+            any_key_back
+            continue
+        fi
+
+        rollback_path="${parent_dir}/.${target_name}.restore_$(date +%Y%m%d_%H%M%S)"
+        echo ""
+        echo -e "${BLUE}正在恢复备份...${PLAIN}"
+        echo ""
+
+        cd "$parent_dir" || {
+            echo -e "${RED}无法进入项目父目录，已取消恢复${PLAIN}"
+            if [[ "$was_running" -eq 1 ]]; then
+                cd "$p_path" && docker compose start
+            fi
+            any_key_back
+            continue
+        }
+
+        if ! mv -- "$p_path" "$rollback_path"; then
+            echo -e "${RED}无法移动当前项目目录，已取消恢复${PLAIN}"
+            if [[ "$was_running" -eq 1 ]]; then
+                cd "$p_path" && docker compose start
+            fi
+            any_key_back
+            continue
+        fi
+
+        if tar -xzf "$selected_backup" -C "$parent_dir" && [[ -d "$p_path" ]]; then
+            rm -rf -- "$rollback_path"
+            echo -e "${GREEN}项目文件恢复成功${PLAIN}"
+        else
+            rm -rf -- "$p_path"
+            if [[ -d "$rollback_path" ]]; then
+                mv -- "$rollback_path" "$p_path"
+            fi
+            echo -e "${RED}恢复失败，原项目文件已回滚${PLAIN}"
+            if [[ "$was_running" -eq 1 ]]; then
+                cd "$p_path" && docker compose start
+            fi
+            any_key_back
+            continue
+        fi
+
+        if [[ "$was_running" -eq 1 ]]; then
+            echo ""
+            echo -e "${YELLOW}正在恢复容器运行...${PLAIN}"
+            echo ""
+            if cd "$p_path" && docker compose up -d; then
+                echo ""
+                echo -e "${GREEN}备份恢复完成，服务已启动${PLAIN}"
+            else
+                echo ""
+                echo -e "${RED}项目文件已恢复，但服务启动失败${PLAIN}"
+            fi
+        else
+            echo ""
+            echo -e "${GREEN}备份恢复完成，项目保持停止状态${PLAIN}"
+        fi
+
+        echo ""
+        echo -e "恢复前快照: ${YELLOW}${pre_restore_backup}${PLAIN}"
         any_key_back
     done
 }
@@ -593,18 +936,21 @@ while IFS="|" read -r name path; do
         filename="\${name}_\$(date +%Y%m%d_%H%M%S).tar.gz"
         parent_dir=\$(dirname "\$path")
         target_name=\$(basename "\$path")
+        was_running=0
 
-        # 1. 先尝试停止容器 (确保 SQLite 数据库不被写入)
         if cd "\$path"; then
-             docker compose stop
+            if docker compose ps -q --status running 2>/dev/null | grep -q .; then
+                was_running=1
+                docker compose stop || continue
+            fi
         fi
 
-        # 2. 执行备份
-        tar -czf "\$BACKUP_DIR/\$filename" -C "\$parent_dir" "\$target_name"
+        if ! tar -czf "\$BACKUP_DIR/\$filename" -C "\$parent_dir" "\$target_name"; then
+            rm -f "\$BACKUP_DIR/\$filename"
+        fi
 
-        # 3. 恢复容器启动
-        if cd "\$path"; then
-             docker compose start
+        if [[ "\$was_running" -eq 1 ]] && cd "\$path"; then
+            docker compose start
         fi
     fi
 done < "\$CONF"
@@ -646,6 +992,53 @@ EOF
     done
 }
 
+# --- 清理多余 Docker 镜像 ---
+cleanup_docker_images() {
+    echo ""
+
+    if ! type -P docker &> /dev/null; then
+        echo -e "${RED}Docker 未安装，无法执行清理。${PLAIN}"
+        any_key_back
+        return
+    fi
+
+    if ! docker info &> /dev/null; then
+        echo -e "${RED}Docker 服务未运行，请先启动 Docker。${PLAIN}"
+        any_key_back
+        return
+    fi
+
+    echo -e "${BLUE}当前 Docker 镜像占用：${PLAIN}"
+    echo ""
+    docker system df
+    echo ""
+    echo -e "${YELLOW}将删除没有被任何容器使用的 Docker 镜像${PLAIN}"
+    echo ""
+    echo -e "${GREEN}容器、网络、数据卷和构建缓存均不会被删除${PLAIN}"
+    echo ""
+    read -p "确认删除多余镜像? (y/n): " confirm
+    echo ""
+
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        echo -e "${BLUE}正在删除多余 Docker 镜像...${PLAIN}"
+        echo ""
+
+        if docker image prune -af; then
+            echo ""
+            echo -e "${GREEN}多余 Docker 镜像清理完成。${PLAIN}"
+            echo ""
+            docker system df
+        else
+            echo ""
+            echo -e "${RED}镜像清理失败，请检查 Docker 服务状态。${PLAIN}"
+        fi
+    else
+        echo -e "${YELLOW}已取消。${PLAIN}"
+    fi
+
+    any_key_back
+}
+
 # --- 子菜单：Docker 服务管理 ---
 docker_mgmt_menu() {
     while true; do
@@ -659,8 +1052,9 @@ docker_mgmt_menu() {
         echo -e " 3. 重启 Docker\n"
         echo -e " 4. 卸载 Docker\n"
         echo -e " 5. 查看备份文件\n"
+        echo -e " 6. 删除多余的 Docker 镜像\n"
         echo -e " 0. 返回\n"
-        read -p "请选择[0-5]: " sub_choice
+        read -p "请选择[0-6]: " sub_choice
         
         if [[ "$sub_choice" == "0" ]]; then
             return
@@ -668,21 +1062,33 @@ docker_mgmt_menu() {
         
         case "$sub_choice" in
             1) 
-                systemctl start docker
-                echo ""
-                echo -e "${GREEN}已启动${PLAIN}"
+                if systemctl start docker; then
+                    echo ""
+                    echo -e "${GREEN}已启动${PLAIN}"
+                else
+                    echo ""
+                    echo -e "${RED}启动失败，请查看上方错误信息${PLAIN}"
+                fi
                 any_key_back
                 ;;
             2) 
-                systemctl stop docker
-                echo ""
-                echo -e "${RED}已停止${PLAIN}"
+                if systemctl stop docker; then
+                    echo ""
+                    echo -e "${GREEN}已停止${PLAIN}"
+                else
+                    echo ""
+                    echo -e "${RED}停止失败，请查看上方错误信息${PLAIN}"
+                fi
                 any_key_back
                 ;;
             3) 
-                systemctl restart docker
-                echo ""
-                echo -e "${GREEN}已重启${PLAIN}"
+                if systemctl restart docker; then
+                    echo ""
+                    echo -e "${GREEN}已重启${PLAIN}"
+                else
+                    echo ""
+                    echo -e "${RED}重启失败，请查看上方错误信息${PLAIN}"
+                fi
                 any_key_back
                 ;;
             4)
@@ -722,6 +1128,9 @@ docker_mgmt_menu() {
                 ls -lh "$BACKUP_DIR"
                 any_key_back
                 ;;
+            6)
+                cleanup_docker_images
+                ;;
             *) echo -e "\n${RED}无效选项${PLAIN}"; sleep 1 ;;
         esac
     done
@@ -748,19 +1157,43 @@ script_mgmt_menu() {
                 echo -e "${BLUE}正在下载最新版本...${PLAIN}"
                 echo ""
 
-                # 使用 "$0" 确保覆盖当前正在运行的这个脚本文件
-                wget --no-check-certificate "https://raw.githubusercontent.com/SHINYUZ/Docker-Compose-Manager/main/docker.sh" -O "$0"
+                current_script=$(readlink -f "$0")
+                update_tmp="${current_script}.new.$$"
 
-                if [[ $? -eq 0 ]]; then
-                    chmod +x "$0"
-                    # 这里去掉了 echo ""，防止出现两行空行
-                    echo -e "${GREEN}更新成功！正在重启脚本...${PLAIN}"
-                    sleep 1
-                    # 重启脚本
-                    exec "$0"
-                else
+                if ! wget "https://raw.githubusercontent.com/SHINYUZ/Docker-Compose-Manager/main/docker.sh" -O "$update_tmp"; then
+                    rm -f "$update_tmp"
                     echo ""
                     echo -e "${RED}下载失败，请检查网络连接。${PLAIN}"
+                    any_key_back
+                    continue
+                fi
+
+                if [[ ! -s "$update_tmp" ]]; then
+                    rm -f "$update_tmp"
+                    echo ""
+                    echo -e "${RED}下载文件为空，原脚本未被修改${PLAIN}"
+                    any_key_back
+                    continue
+                fi
+
+                if ! bash -n "$update_tmp"; then
+                    rm -f "$update_tmp"
+                    echo ""
+                    echo -e "${RED}新版本语法检查失败，原脚本未被修改${PLAIN}"
+                    any_key_back
+                    continue
+                fi
+
+                chmod +x "$update_tmp"
+                if mv -f "$update_tmp" "$current_script"; then
+                    echo ""
+                    echo -e "${GREEN}更新成功！正在重启脚本...${PLAIN}"
+                    sleep 1
+                    exec "$current_script"
+                else
+                    rm -f "$update_tmp"
+                    echo ""
+                    echo -e "${RED}替换脚本失败，原脚本未被修改${PLAIN}"
                     any_key_back
                 fi
                 ;;
