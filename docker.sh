@@ -350,7 +350,7 @@ manage_project() {
             echo ""
             echo -e " 4. 更新容器"
             echo ""
-            echo -e " 5. 删除容器"
+            echo -e " 5. 删除项目"
             echo ""
             echo -e " 6. 编辑名称"
             echo ""
@@ -364,7 +364,9 @@ manage_project() {
             read -p "请选择操作 [0-8]: " op_choice
             echo ""
 
-            cd "$p_path" || { echo -e "${RED}进入目录失败${PLAIN}"; any_key_back; break; }
+            if [[ "$op_choice" != "5" ]]; then
+                cd "$p_path" || { echo -e "${RED}进入目录失败${PLAIN}"; any_key_back; break; }
+            fi
 
             case "$op_choice" in
                 1)
@@ -426,7 +428,7 @@ manage_project() {
                     any_key_back
                     ;;
                 5)
-                    echo -e "${RED}警告：此操作将删除项目目录及其中的全部数据${PLAIN}"
+                    echo -e "${RED}警告：此操作将删除容器、网络、数据卷、项目镜像、项目目录及其中的全部数据${PLAIN}"
                     echo ""
                     echo -e "项目名称: ${YELLOW}${p_name}${PLAIN}"
                     echo ""
@@ -435,15 +437,29 @@ manage_project() {
                     read -p "请输入项目名称 ${p_name} 确认删除: " confirm_name
                     echo ""
                     if [[ "$confirm_name" == "$p_name" ]]; then
-                        if ! validate_project_path "$p_path" || [[ ! -d "$p_path" ]]; then
+                        if ! validate_project_path "$p_path"; then
                             echo -e "${RED}项目路径无效，已取消删除${PLAIN}"
                             any_key_back
                             continue
                         fi
 
-                        echo -e "${BLUE}正在停止容器并清理数据卷...${PLAIN}"
+                        if [[ ! -d "$p_path" ]]; then
+                            echo -e "${YELLOW}项目目录不存在，仅删除项目管理记录...${PLAIN}"
+                            echo ""
+                            if sed -i "${p_idx}d" "$PROJECT_CONF_FILE"; then
+                                echo -e "${GREEN}项目管理记录已删除${PLAIN}"
+                                any_key_back
+                                return
+                            else
+                                echo -e "${RED}项目管理记录删除失败${PLAIN}"
+                            fi
+                            any_key_back
+                            continue
+                        fi
+
+                        echo -e "${BLUE}正在删除容器、网络、数据卷和项目镜像...${PLAIN}"
                         echo ""
-                        if docker compose down --volumes; then
+                        if docker compose down --volumes --rmi all --remove-orphans; then
                             echo ""
                             echo -e "${BLUE}正在删除项目文件...${PLAIN}"
                             echo ""
