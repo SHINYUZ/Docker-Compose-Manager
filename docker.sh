@@ -444,7 +444,7 @@ manage_project() {
                         fi
 
                         if [[ ! -d "$p_path" ]]; then
-                            echo -e "${YELLOW}项目目录不存在，仅删除项目管理记录...${PLAIN}"
+                            echo -e "${YELLOW}项目目录不存在，仅删除项目管理记录${PLAIN}"
                             echo ""
                             if sed -i "${p_idx}d" "$PROJECT_CONF_FILE"; then
                                 echo -e "${GREEN}项目管理记录已删除${PLAIN}"
